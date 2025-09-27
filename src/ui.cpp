@@ -15,6 +15,8 @@
 #include "emojilist.h"
 #include "log.h"
 #include "messagecache.h"
+#include "cryptoutil.h"
+#include "uimessagedialog.h"
 #include "timeutil.h"
 #include "uicolorconfig.h"
 #include "uiconfig.h"
@@ -62,6 +64,18 @@ void Ui::Init()
   UiColorConfig::Init();
   m_Model->Init();
   m_Controller->Init();
+
+  if (!CryptoUtil::IsReady())
+  {
+    const std::string warningText =
+      "Local chat cache encryption is DISABLED.\n\n"
+      "Set NCHAT_KEY_PASSPHRASE and restart nchat\n"
+      "to unlock or wrap the cache key.\n\n"
+      "Press Enter to continue without encryption.";
+    UiDialogParams params(m_Model.get(), "Security Warning", 0.85f, 7.0f);
+    UiMessageDialog dialog(params, warningText);
+    dialog.Run();
+  }
 }
 
 void Ui::Cleanup()

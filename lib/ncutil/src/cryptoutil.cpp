@@ -9,9 +9,12 @@
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <openssl/sha.h>
 
 #include <sys/stat.h>
 
+#include <cstdlib>
+#include <sstream>
 #include <vector>
 
 #include "fileutil.h"
@@ -23,12 +26,18 @@ namespace
   constexpr size_t KEY_SIZE = 32; // AES-256
   constexpr size_t IV_SIZE = 12;  // recommended size for GCM
   constexpr size_t TAG_SIZE = 16;
+  constexpr size_t SALT_SIZE = 16;
+  constexpr int PBKDF2_ITERATIONS = 200000;
+  const char* const PASSPHRASE_ENV = "NCHAT_KEY_PASSPHRASE";
+  const char* const KEYFILE_MAGIC = "format=enc-v1";
 }
 
 std::string CryptoUtil::m_KeyPath;
 std::vector<unsigned char> CryptoUtil::m_Key;
 bool CryptoUtil::m_KeyLoaded = false;
 std::mutex CryptoUtil::m_KeyMutex;
+bool CryptoUtil::m_UsePassphrase = false;
+std::string CryptoUtil::m_Passphrase;
 
 void CryptoUtil::Init(const std::string& p_KeyPath)
 {
@@ -36,6 +45,18 @@ void CryptoUtil::Init(const std::string& p_KeyPath)
   m_KeyPath = p_KeyPath;
   m_Key.clear();
   m_KeyLoaded = false;
+
+  const char* passphraseEnv = getenv(PASSPHRASE_ENV);
+  if ((passphraseEnv != nullptr) && (passphraseEnv[0] != '\0'))
+  {
+    m_Passphrase = std::string(passphraseEnv);
+    m_UsePassphrase = true;
+  }
+  else
+  {
+    m_Passphrase.clear();
+    m_UsePassphrase = false;
+  }
 }
 
 bool CryptoUtil::IsReady()
@@ -241,16 +262,51 @@ bool CryptoUtil::LoadKeyLocked()
 
   if (FileUtil::Exists(m_KeyPath))
   {
-    std::string keyHex = FileUtil::ReadFile(m_KeyPath);
-    StrUtil::Trim(keyHex);
-    std::string keyRaw = StrUtil::StrFromHex(keyHex);
-    if (keyRaw.size() == KEY_SIZE)
+    std::string keyData = FileUtil::ReadFile(m_KeyPath);
+    StrUtil::Trim(keyData);
+
+    std::vector<unsigned char> keyCandidate;
+    const bool isEncrypted = StrUtil::StartsWith(keyData, KEYFILE_MAGIC);
+
+    if (isEncrypted)
     {
-      m_Key.assign(keyRaw.begin(), keyRaw.end());
+      if (!m_UsePassphrase)
+      {
+        LOG_WARNING("encryption key is passphrase protected but no passphrase provided (set %s)", PASSPHRASE_ENV);
+        return false;
+      }
+
+      if (!DecryptStoredKey(keyData, keyCandidate))
+      {
+        LOG_WARNING("failed to decrypt stored encryption key");
+        return false;
+      }
+
+      m_Key = keyCandidate;
       return true;
     }
+    else
+    {
+      std::string keyRaw = StrUtil::StrFromHex(keyData);
+      if (keyRaw.size() == KEY_SIZE)
+      {
+        keyCandidate.assign(keyRaw.begin(), keyRaw.end());
 
-    LOG_WARNING("invalid encryption key, regenerating");
+        if (m_UsePassphrase)
+        {
+          if (!PersistKeyLocked(keyCandidate))
+          {
+            LOG_WARNING("failed to migrate encryption key to passphrase-protected storage");
+            return false;
+          }
+        }
+
+        m_Key = keyCandidate;
+        return true;
+      }
+
+      LOG_WARNING("invalid encryption key, regenerating");
+    }
   }
 
   std::vector<unsigned char> key(KEY_SIZE);
@@ -260,11 +316,277 @@ bool CryptoUtil::LoadKeyLocked()
     return false;
   }
 
-  std::string keyRaw(reinterpret_cast<const char*>(key.data()), key.size());
+  if (!PersistKeyLocked(key))
+  {
+    return false;
+  }
+
+  m_Key = key;
+  return true;
+}
+
+bool CryptoUtil::PersistKeyLocked(const std::vector<unsigned char>& p_Key)
+{
+  if (m_KeyPath.empty()) return false;
+
+  if (m_UsePassphrase)
+  {
+    std::string serialized;
+    if (!EncryptKey(p_Key, serialized))
+    {
+      LOG_WARNING("failed to encrypt cache key for storage");
+      return false;
+    }
+
+    FileUtil::WriteFile(m_KeyPath, serialized);
+    chmod(m_KeyPath.c_str(), 0600);
+    return true;
+  }
+
+  std::string keyRaw(reinterpret_cast<const char*>(p_Key.data()), p_Key.size());
   std::string keyHex = StrUtil::StrToHex(keyRaw);
   FileUtil::WriteFile(m_KeyPath, keyHex + "\n");
   chmod(m_KeyPath.c_str(), 0600);
+  return true;
+}
 
-  m_Key = key;
+bool CryptoUtil::EncryptKey(const std::vector<unsigned char>& p_Key, std::string& p_Serialized)
+{
+  if (!m_UsePassphrase || m_Passphrase.empty())
+  {
+    LOG_WARNING("passphrase not set, cannot encrypt key");
+    return false;
+  }
+
+  std::vector<unsigned char> salt(SALT_SIZE);
+  std::vector<unsigned char> iv(IV_SIZE);
+  std::vector<unsigned char> tag(TAG_SIZE);
+
+  if ((RAND_bytes(salt.data(), static_cast<int>(salt.size())) != 1) ||
+      (RAND_bytes(iv.data(), static_cast<int>(iv.size())) != 1))
+  {
+    LOG_WARNING("failed to generate key protection parameters");
+    return false;
+  }
+
+  std::vector<unsigned char> derivedKey(KEY_SIZE);
+  if (!DerivePassphraseKey(m_Passphrase, salt, derivedKey))
+  {
+    return false;
+  }
+
+  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  if (ctx == nullptr)
+  {
+    LOG_WARNING("failed to allocate cipher context for key protection");
+    return false;
+  }
+
+  bool success = true;
+  std::vector<unsigned char> cipher(KEY_SIZE);
+  int outLen = 0;
+
+  if (success && EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1)
+  {
+    success = false;
+  }
+
+  if (success && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(iv.size()), nullptr) != 1)
+  {
+    success = false;
+  }
+
+  if (success && EVP_EncryptInit_ex(ctx, nullptr, nullptr, derivedKey.data(), iv.data()) != 1)
+  {
+    success = false;
+  }
+
+  if (success &&
+      EVP_EncryptUpdate(ctx, cipher.data(), &outLen, p_Key.data(), static_cast<int>(p_Key.size())) != 1)
+  {
+    success = false;
+  }
+
+  int tmpLen = 0;
+  if (success && EVP_EncryptFinal_ex(ctx, cipher.data() + outLen, &tmpLen) != 1)
+  {
+    success = false;
+  }
+
+  outLen += tmpLen;
+  cipher.resize(outLen);
+
+  if (success && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_SIZE, tag.data()) != 1)
+  {
+    success = false;
+  }
+
+  EVP_CIPHER_CTX_free(ctx);
+
+  if (!success)
+  {
+    LOG_WARNING("failed to encrypt key material");
+    return false;
+  }
+
+  std::ostringstream oss;
+  oss << KEYFILE_MAGIC << "\n";
+  oss << "salt=" << StrUtil::StrToHex(std::string(reinterpret_cast<const char*>(salt.data()), salt.size())) << "\n";
+  oss << "iv=" << StrUtil::StrToHex(std::string(reinterpret_cast<const char*>(iv.data()), iv.size())) << "\n";
+  oss << "tag=" << StrUtil::StrToHex(std::string(reinterpret_cast<const char*>(tag.data()), tag.size())) << "\n";
+  oss << "ct=" << StrUtil::StrToHex(std::string(reinterpret_cast<const char*>(cipher.data()), cipher.size())) << "\n";
+
+  p_Serialized = oss.str();
+  return true;
+}
+
+bool CryptoUtil::DecryptStoredKey(const std::string& p_Data, std::vector<unsigned char>& p_Key)
+{
+  std::vector<std::string> lines = StrUtil::Split(p_Data, '\n');
+  std::string saltHex;
+  std::string ivHex;
+  std::string tagHex;
+  std::string ctHex;
+
+  for (const std::string& lineRaw : lines)
+  {
+    std::string line = lineRaw;
+    StrUtil::Trim(line);
+    if (line.empty()) continue;
+
+    if (StrUtil::StartsWith(line, "salt="))
+    {
+      saltHex = line.substr(5);
+    }
+    else if (StrUtil::StartsWith(line, "iv="))
+    {
+      ivHex = line.substr(3);
+    }
+    else if (StrUtil::StartsWith(line, "tag="))
+    {
+      tagHex = line.substr(4);
+    }
+    else if (StrUtil::StartsWith(line, "ct="))
+    {
+      ctHex = line.substr(3);
+    }
+  }
+
+  if (saltHex.empty() || ivHex.empty() || tagHex.empty() || ctHex.empty())
+  {
+    LOG_WARNING("incomplete encrypted key data");
+    return false;
+  }
+
+  std::string saltStr = StrUtil::StrFromHex(saltHex);
+  std::string ivStr = StrUtil::StrFromHex(ivHex);
+  std::string tagStr = StrUtil::StrFromHex(tagHex);
+  std::string ctStr = StrUtil::StrFromHex(ctHex);
+
+  if ((saltStr.size() != SALT_SIZE) || (ivStr.size() != IV_SIZE) || (tagStr.size() != TAG_SIZE))
+  {
+    LOG_WARNING("invalid encrypted key parameter sizes");
+    return false;
+  }
+
+  std::vector<unsigned char> salt(saltStr.begin(), saltStr.end());
+  std::vector<unsigned char> iv(ivStr.begin(), ivStr.end());
+  std::vector<unsigned char> tag(tagStr.begin(), tagStr.end());
+  std::vector<unsigned char> cipher(ctStr.begin(), ctStr.end());
+
+  if (cipher.empty())
+  {
+    LOG_WARNING("encrypted key payload empty");
+    return false;
+  }
+
+  std::vector<unsigned char> derived(KEY_SIZE);
+  if (!DerivePassphraseKey(m_Passphrase, salt, derived))
+  {
+    return false;
+  }
+
+  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  if (ctx == nullptr)
+  {
+    LOG_WARNING("failed to allocate cipher context for key decryption");
+    return false;
+  }
+
+  bool success = true;
+  std::vector<unsigned char> plain(cipher.size());
+  int len = 0;
+
+  if (success && EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1)
+  {
+    success = false;
+  }
+
+  if (success && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(iv.size()), nullptr) != 1)
+  {
+    success = false;
+  }
+
+  if (success && EVP_DecryptInit_ex(ctx, nullptr, nullptr, derived.data(), iv.data()) != 1)
+  {
+    success = false;
+  }
+
+  if (success &&
+      EVP_DecryptUpdate(ctx, plain.data(), &len, cipher.data(), static_cast<int>(cipher.size())) != 1)
+  {
+    success = false;
+  }
+
+  if (success && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_SIZE, tag.data()) != 1)
+  {
+    success = false;
+  }
+
+  int finLen = 0;
+  if (success && EVP_DecryptFinal_ex(ctx, plain.data() + len, &finLen) != 1)
+  {
+    success = false;
+  }
+
+  len += finLen;
+  plain.resize(len);
+
+  EVP_CIPHER_CTX_free(ctx);
+
+  if (!success)
+  {
+    LOG_WARNING("failed to decrypt key material (invalid passphrase?)");
+    return false;
+  }
+
+  if (plain.size() != KEY_SIZE)
+  {
+    LOG_WARNING("unexpected plain key size");
+    return false;
+  }
+
+  p_Key = plain;
+  return true;
+}
+
+bool CryptoUtil::DerivePassphraseKey(const std::string& p_Passphrase,
+                                     const std::vector<unsigned char>& p_Salt,
+                                     std::vector<unsigned char>& p_Derived)
+{
+  if (p_Derived.size() != KEY_SIZE)
+  {
+    p_Derived.resize(KEY_SIZE);
+  }
+
+  if (PKCS5_PBKDF2_HMAC(p_Passphrase.c_str(), static_cast<int>(p_Passphrase.size()),
+                         p_Salt.data(), static_cast<int>(p_Salt.size()),
+                         PBKDF2_ITERATIONS, EVP_sha256(),
+                         static_cast<int>(p_Derived.size()), p_Derived.data()) != 1)
+  {
+    LOG_WARNING("failed to derive passphrase key");
+    return false;
+  }
+
   return true;
 }

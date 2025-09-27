@@ -22,10 +22,18 @@ public:
 private:
   static bool EnsureKey();
   static bool LoadKeyLocked();
+  static bool PersistKeyLocked(const std::vector<unsigned char>& p_Key);
+  static bool EncryptKey(const std::vector<unsigned char>& p_Key, std::string& p_Serialized);
+  static bool DecryptStoredKey(const std::string& p_Data, std::vector<unsigned char>& p_Key);
+  static bool DerivePassphraseKey(const std::string& p_Passphrase,
+                                  const std::vector<unsigned char>& p_Salt,
+                                  std::vector<unsigned char>& p_Derived);
 
 private:
   static std::string m_KeyPath;
   static std::vector<unsigned char> m_Key;
   static bool m_KeyLoaded;
   static std::mutex m_KeyMutex;
+  static bool m_UsePassphrase;
+  static std::string m_Passphrase;
 };
