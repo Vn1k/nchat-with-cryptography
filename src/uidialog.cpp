@@ -7,6 +7,8 @@
 
 #include "uidialog.h"
 
+#include <clocale>
+
 #include "strutil.h"
 #include "uicolorconfig.h"
 #include "uimodel.h"
@@ -70,7 +72,20 @@ void UiDialog::DrawBorder()
   wbkgd(m_BorderWin, colorPair | ' ');
   wattron(m_BorderWin, attribute | colorPair);
 
-  wborder(m_BorderWin, 0, 0, 0, 0, 0, 0, 0, 0);
+  const bool useWideBorder = (MB_CUR_MAX > 1);
+
+#if defined(WACS_VLINE) && defined(WACS_HLINE) && defined(WACS_ULCORNER) && \
+    defined(WACS_URCORNER) && defined(WACS_LLCORNER) && defined(WACS_LRCORNER)
+  if (useWideBorder)
+  {
+    wborder_set(m_BorderWin, WACS_VLINE, WACS_VLINE, WACS_HLINE, WACS_HLINE,
+                WACS_ULCORNER, WACS_URCORNER, WACS_LLCORNER, WACS_LRCORNER);
+  }
+  else
+#endif
+  {
+    wborder(m_BorderWin, '|', '|', '-', '-', '+', '+', '+', '+');
+  }
   const int maxTextWidth = m_W - 2;
 
   std::string title = " " + m_Title.substr(0, maxTextWidth) + " ";

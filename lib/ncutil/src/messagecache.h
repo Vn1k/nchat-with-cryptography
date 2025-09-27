@@ -244,6 +244,9 @@ private:
                                      const std::string& p_MsgId, std::vector<ChatMessage>& p_ChatMessages);
 
   static void CallMessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMessage);
+  static std::string EncryptSensitiveField(const std::string& p_Value);
+  static std::string DecryptSensitiveField(const std::string& p_Value);
+  static bool HasEncryptedPrefix(const std::string& p_Value);
 
 private:
   static std::function<void(std::shared_ptr<ServiceMessage>)> m_MessageHandler;
@@ -262,4 +265,5 @@ private:
   static std::string m_HistoryDir;
   static bool m_CacheEnabled;
   static bool m_CacheReadOnly;
+  static const std::string s_EncryptedPrefix;
 };

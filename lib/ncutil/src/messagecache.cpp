@@ -18,6 +18,7 @@
 #include "appconfig.h"
 #include "cacheutil.h"
 #include "log.h"
+#include "cryptoutil.h"
 #include "fileutil.h"
 #include "protocolutil.h"
 #include "serialization.h"
@@ -38,6 +39,7 @@ std::deque<std::shared_ptr<MessageCache::Request>> MessageCache::m_Queue;
 std::string MessageCache::m_HistoryDir;
 bool MessageCache::m_CacheEnabled = true;
 bool MessageCache::m_CacheReadOnly = false;
+const std::string MessageCache::s_EncryptedPrefix = "enc:";
 
 static const std::string s_TableContacts = "contacts2";
 static const std::string s_TableChats = "chats2";
@@ -48,6 +50,8 @@ void MessageCache::Init()
   m_CacheEnabled = AppConfig::GetBool("cache_enabled");
 
   if (!m_CacheEnabled) return;
+
+  CryptoUtil::Init(FileUtil::GetApplicationDir() + "/cache.key");
 
   static const int dirVersion = 6;
   m_HistoryDir = FileUtil::GetApplicationDir() + "/history";
@@ -921,6 +925,9 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
 
         for (const auto& msg : addMessagesRequest->chatMessages)
         {
+          const std::string storedText = EncryptSensitiveField(msg.text);
+          const std::string storedQuotedText = EncryptSensitiveField(msg.quotedText);
+
           // Fetch already cached message reactions
           Reactions oldReactions;
           try
@@ -960,7 +967,7 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
               *m_Dbs[profileId] << "INSERT INTO " + s_TableMessages + " "
                 "(chatId, id, senderId, text, quotedId, quotedText, quotedSender, fileInfo, timeSent, isOutgoing, isRead, reactions) VALUES "
                 "(?,?,?,?,?,?,?,?,?,?,?,?);" <<
-                chatId << msg.id << msg.senderId << msg.text << msg.quotedId << msg.quotedText << msg.quotedSender <<
+                chatId << msg.id << msg.senderId << storedText << msg.quotedId << storedQuotedText << msg.quotedSender <<
                 msg.fileInfo << msg.timeSent << msg.isOutgoing << msg.isRead << reactionsBytes;
             }
             catch (const sqlite::sqlite_exception& ex)
@@ -985,7 +992,7 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
               *m_Dbs[profileId] << "INSERT INTO " + s_TableMessages + " "
                 "(chatId, id, senderId, text, quotedId, quotedText, quotedSender, fileInfo, timeSent, isOutgoing, isRead, reactions) VALUES "
                 "(?,?,?,?,?,?,?,?,?,?,?,?);" <<
-                chatId << msg.id << msg.senderId << msg.text << msg.quotedId << msg.quotedText << msg.quotedSender <<
+                chatId << msg.id << msg.senderId << storedText << msg.quotedId << storedQuotedText << msg.quotedSender <<
                 msg.fileInfo << msg.timeSent << msg.isOutgoing << msg.isRead << reactionsBytes;
             }
             catch (const sqlite::sqlite_exception& ex)
@@ -1062,10 +1069,11 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
 
           for (const auto& contactInfo : addContactsRequest->contactInfos)
           {
+            const std::string storedPhone = EncryptSensitiveField(contactInfo.phone);
             *m_Dbs[profileId] << "INSERT INTO " + s_TableContacts + " "
               "(id, name, phone, isSelf) VALUES "
               "(?,?,?,?);" <<
-              contactInfo.id << contactInfo.name << contactInfo.phone << contactInfo.isSelf;
+              contactInfo.id << contactInfo.name << storedPhone << contactInfo.isSelf;
           }
           *m_Dbs[profileId] << "COMMIT;";
         }
@@ -1151,7 +1159,7 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
               ContactInfo contactInfo;
               contactInfo.id = id;
               contactInfo.name = name;
-              contactInfo.phone = phone;
+              contactInfo.phone = DecryptSensitiveField(phone);
               contactInfo.isSelf = isSelf;
               contactInfos.push_back(contactInfo);
             };
@@ -1317,6 +1325,61 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
           catch (const sqlite::sqlite_exception& ex)
           {
             HANDLE_SQLITE_EXCEPTION(ex);
+          }
+
+          if (foundMsgId.empty())
+          {
+            const std::string needle = StrUtil::ToLower(findText);
+            try
+            {
+              const int manualLimit = 500;
+              *m_Dbs[profileId] <<
+                "SELECT " + s_TableMessages + ".id, " + s_TableMessages + ".text, " + s_TableMessages + ".timeSent, "
+                "       " + s_TableContacts + ".name, " + s_TableContacts + ".isSelf "
+                "FROM " + s_TableMessages + " "
+                "LEFT JOIN " + s_TableContacts + " "
+                "ON " + s_TableMessages + ".senderId = " + s_TableContacts + ".id "
+                "WHERE chatId = ? AND timeSent < ? "
+                "ORDER BY timeSent DESC LIMIT ?;"
+                << chatId << findFromMsgIdTimeSent << manualLimit >>
+                [&](const std::string& id, const std::string& encText,
+                    const int64_t& timeSent, const std::string& contactName,
+                    const int32_t& isSelf)
+                {
+                  if (!foundMsgId.empty())
+                  {
+                    return;
+                  }
+
+                  const std::string textLower = StrUtil::ToLower(DecryptSensitiveField(encText));
+                  if (textLower.find(needle) != std::string::npos)
+                  {
+                    foundMsgId = id;
+                    foundMsgIdTimeSent = timeSent;
+                    return;
+                  }
+
+                  std::string name = contactName;
+                  if (isSelf)
+                  {
+                    name = "You";
+                  }
+
+                  if (!name.empty())
+                  {
+                    std::string nameLower = StrUtil::ToLower(name);
+                    if (nameLower.find(needle) != std::string::npos)
+                    {
+                      foundMsgId = id;
+                      foundMsgIdTimeSent = timeSent;
+                    }
+                  }
+                };
+            }
+            catch (const sqlite::sqlite_exception& ex)
+            {
+              HANDLE_SQLITE_EXCEPTION(ex);
+            }
           }
         }
         else if (!findMsgId.empty())
@@ -1681,9 +1744,9 @@ void MessageCache::PerformFetchMessagesFrom(const std::string& p_ProfileId, cons
         ChatMessage chatMessage;
         chatMessage.id = id;
         chatMessage.senderId = senderId;
-        chatMessage.text = text;
+        chatMessage.text = DecryptSensitiveField(text);
         chatMessage.quotedId = quotedId;
-        chatMessage.quotedText = quotedText;
+        chatMessage.quotedText = DecryptSensitiveField(quotedText);
         chatMessage.quotedSender = quotedSender;
         chatMessage.fileInfo = fileInfo;
         chatMessage.timeSent = timeSent;
@@ -1724,9 +1787,9 @@ void MessageCache::PerformFetchOneMessage(const std::string& p_ProfileId, const 
         ChatMessage chatMessage;
         chatMessage.id = id;
         chatMessage.senderId = senderId;
-        chatMessage.text = text;
+        chatMessage.text = DecryptSensitiveField(text);
         chatMessage.quotedId = quotedId;
-        chatMessage.quotedText = quotedText;
+        chatMessage.quotedText = DecryptSensitiveField(quotedText);
         chatMessage.quotedSender = quotedSender;
         chatMessage.fileInfo = fileInfo;
         chatMessage.timeSent = timeSent;
@@ -1758,4 +1821,39 @@ void MessageCache::CallMessageHandler(std::shared_ptr<ServiceMessage> p_ServiceM
   {
     LOG_WARNING("message handler not set");
   }
+}
+
+std::string MessageCache::EncryptSensitiveField(const std::string& p_Value)
+{
+  if (p_Value.empty()) return p_Value;
+
+  std::string cipherHex;
+  if (CryptoUtil::Encrypt(p_Value, cipherHex) && !cipherHex.empty())
+  {
+    return s_EncryptedPrefix + cipherHex;
+  }
+
+  LOG_WARNING("sensitive field encryption failed");
+  return p_Value;
+}
+
+std::string MessageCache::DecryptSensitiveField(const std::string& p_Value)
+{
+  if (!HasEncryptedPrefix(p_Value)) return p_Value;
+
+  std::string cipherHex = p_Value.substr(s_EncryptedPrefix.size());
+  std::string plainText;
+  if (CryptoUtil::Decrypt(cipherHex, plainText))
+  {
+    return plainText;
+  }
+
+  LOG_WARNING("sensitive field decryption failed");
+  return p_Value;
+}
+
+bool MessageCache::HasEncryptedPrefix(const std::string& p_Value)
+{
+  if (p_Value.size() <= s_EncryptedPrefix.size()) return false;
+  return (p_Value.compare(0, s_EncryptedPrefix.size(), s_EncryptedPrefix) == 0);
 }
