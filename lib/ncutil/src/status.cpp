@@ -7,6 +7,8 @@
 
 #include "status.h"
 
+#include "cryptoutil.h"
+
 uint32_t Status::m_Flags = 0;
 std::map<std::string, uint32_t> Status::m_ProfileFlags;
 std::mutex Status::m_Mutex;
@@ -33,15 +35,19 @@ void Status::Clear(const std::string& p_ProfileId, uint32_t p_Flags)
 
 std::string Status::ToString(uint32_t p_Flags)
 {
-  if (p_Flags & FlagSyncing) return "Syncing";
-  if (p_Flags & FlagFetching) return "Fetching";
-  if (p_Flags & FlagSending) return "Sending";
-  if (p_Flags & FlagUpdating) return "Updating";
-  if (p_Flags & FlagAway) return "Away";
-  if (p_Flags & FlagOnline) return "Online";
-  if (p_Flags & FlagConnecting) return "Connecting";
+  std::string status;
+  if (p_Flags & FlagSyncing) status = "Syncing";
+  else if (p_Flags & FlagFetching) status = "Fetching";
+  else if (p_Flags & FlagSending) status = "Sending";
+  else if (p_Flags & FlagUpdating) status = "Updating";
+  else if (p_Flags & FlagAway) status = "Away";
+  else if (p_Flags & FlagOnline) status = "Online";
+  else if (p_Flags & FlagConnecting) status = "Connecting";
+  else status = "Offline";
 
-  return "Offline";
+  const bool cryptoReady = CryptoUtil::IsReady();
+  status += std::string(" ") + (cryptoReady ? "Encrypted" : "Unencrypted");
+  return status;
 }
 
 void Status::UpdateCombined()

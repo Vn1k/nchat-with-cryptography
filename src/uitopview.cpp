@@ -15,6 +15,8 @@
 #include "uiconfig.h"
 #include "uimodel.h"
 
+#include "cryptoutil.h"
+
 UiTopView::UiTopView(const UiViewParams& p_Params)
   : UiViewBase(p_Params)
 {
@@ -27,9 +29,12 @@ void UiTopView::Draw()
   static const uint32_t statusMask = fullMask & (awayStatusIndication ? fullMask : ~Status::FlagAway);
 
   static uint32_t lastStatus = 0;
+  static bool lastCryptoReady = false;
   uint32_t status = Status::Get(statusMask);
-  m_Dirty |= (status != lastStatus);
+  const bool cryptoReady = CryptoUtil::IsReady();
+  m_Dirty |= (status != lastStatus) || (cryptoReady != lastCryptoReady);
   lastStatus = status;
+  lastCryptoReady = cryptoReady;
 
   if (!m_Dirty) return;
   m_Dirty = false;
@@ -66,7 +71,8 @@ void UiTopView::Draw()
 
   static const bool topShowVersion = UiConfig::GetBool("top_show_version");
   static const std::string appNameVersion = AppUtil::GetAppName(topShowVersion);
-  const std::string statusStr = Status::ToString(status) + statusSuffixStr;
+
+  std::string statusStr = Status::ToString(status) + statusSuffixStr;
   std::wstring topWStrLeft = StrUtil::ToWString(std::string(topPadLeft, ' ') + appNameVersion);
   std::wstring topWStrRight = StrUtil::ToWString(statusStr + std::string(topPadRight, ' '));
   int topStrLeftWidth = StrUtil::WStringWidth(topWStrLeft);
