@@ -352,7 +352,23 @@ void MessageCache::AddProfile(const std::string& p_ProfileId, bool p_CheckSync, 
         "SET schema=?;" << schemaVersion;
     }
 
-    static const int64_t s_SchemaVersion = 5;
+    if (schemaVersion == 5)
+    {
+      LOG_INFO("update db schema 5 to 6");
+
+      if (MigrateSensitiveData(p_ProfileId))
+      {
+        schemaVersion = 6;
+        *m_Dbs[p_ProfileId] << "UPDATE version "
+          "SET schema=?;" << schemaVersion;
+      }
+      else
+      {
+        LOG_WARNING("deferred sensitive data migration for %s", p_ProfileId.c_str());
+      }
+    }
+
+    static const int64_t s_SchemaVersion = 6;
     if (schemaVersion > s_SchemaVersion)
     {
       LOG_WARNING("cache db schema %d from newer nchat version detected, if cache issues are encountered "
@@ -734,7 +750,8 @@ void MessageCache::Export(const std::string& p_ExportDir)
       *m_Dbs[profileId] << "SELECT id, name, isSelf FROM " + s_TableContacts + ";" >>
         [&](const std::string& id, const std::string& name, int32_t isSelf)
         {
-          contactNames[id] = isSelf ? selfName : name;
+          std::string plainName = DecryptSensitiveField(name);
+          contactNames[id] = isSelf ? selfName : plainName;
         };
       // *INDENT-ON*
     }
@@ -927,6 +944,8 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
         {
           const std::string storedText = EncryptSensitiveField(msg.text);
           const std::string storedQuotedText = EncryptSensitiveField(msg.quotedText);
+          const std::string storedQuotedSender = EncryptSensitiveField(msg.quotedSender);
+          const std::string storedFileInfo = EncryptSensitiveField(msg.fileInfo);
 
           // Fetch already cached message reactions
           Reactions oldReactions;
@@ -967,8 +986,8 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
               *m_Dbs[profileId] << "INSERT INTO " + s_TableMessages + " "
                 "(chatId, id, senderId, text, quotedId, quotedText, quotedSender, fileInfo, timeSent, isOutgoing, isRead, reactions) VALUES "
                 "(?,?,?,?,?,?,?,?,?,?,?,?);" <<
-                chatId << msg.id << msg.senderId << storedText << msg.quotedId << storedQuotedText << msg.quotedSender <<
-                msg.fileInfo << msg.timeSent << msg.isOutgoing << msg.isRead << reactionsBytes;
+                chatId << msg.id << msg.senderId << storedText << msg.quotedId << storedQuotedText << storedQuotedSender <<
+                storedFileInfo << msg.timeSent << msg.isOutgoing << msg.isRead << reactionsBytes;
             }
             catch (const sqlite::sqlite_exception& ex)
             {
@@ -992,8 +1011,8 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
               *m_Dbs[profileId] << "INSERT INTO " + s_TableMessages + " "
                 "(chatId, id, senderId, text, quotedId, quotedText, quotedSender, fileInfo, timeSent, isOutgoing, isRead, reactions) VALUES "
                 "(?,?,?,?,?,?,?,?,?,?,?,?);" <<
-                chatId << msg.id << msg.senderId << storedText << msg.quotedId << storedQuotedText << msg.quotedSender <<
-                msg.fileInfo << msg.timeSent << msg.isOutgoing << msg.isRead << reactionsBytes;
+                chatId << msg.id << msg.senderId << storedText << msg.quotedId << storedQuotedText << storedQuotedSender <<
+                storedFileInfo << msg.timeSent << msg.isOutgoing << msg.isRead << reactionsBytes;
             }
             catch (const sqlite::sqlite_exception& ex)
             {
@@ -1069,11 +1088,12 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
 
           for (const auto& contactInfo : addContactsRequest->contactInfos)
           {
+            const std::string storedName = EncryptSensitiveField(contactInfo.name);
             const std::string storedPhone = EncryptSensitiveField(contactInfo.phone);
             *m_Dbs[profileId] << "INSERT INTO " + s_TableContacts + " "
               "(id, name, phone, isSelf) VALUES "
               "(?,?,?,?);" <<
-              contactInfo.id << contactInfo.name << storedPhone << contactInfo.isSelf;
+              contactInfo.id << storedName << storedPhone << contactInfo.isSelf;
           }
           *m_Dbs[profileId] << "COMMIT;";
         }
@@ -1158,7 +1178,7 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
             {
               ContactInfo contactInfo;
               contactInfo.id = id;
-              contactInfo.name = name;
+              contactInfo.name = DecryptSensitiveField(name);
               contactInfo.phone = DecryptSensitiveField(phone);
               contactInfo.isSelf = isSelf;
               contactInfos.push_back(contactInfo);
@@ -1359,11 +1379,7 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
                     return;
                   }
 
-                  std::string name = contactName;
-                  if (isSelf)
-                  {
-                    name = "You";
-                  }
+                  std::string name = isSelf ? std::string("You") : DecryptSensitiveField(contactName);
 
                   if (!name.empty())
                   {
@@ -1579,11 +1595,12 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
         const std::string& chatId = updateMessageFileInfoRequest->chatId;
         const std::string& msgId = updateMessageFileInfoRequest->msgId;
         const std::string& fileInfo = updateMessageFileInfoRequest->fileInfo;
+        const std::string storedFileInfo = EncryptSensitiveField(fileInfo);
 
         try
         {
           *m_Dbs[profileId] << "UPDATE " + s_TableMessages + " SET fileInfo = ? WHERE chatId = ? AND id = ?;"
-                            << fileInfo << chatId << msgId;
+                            << storedFileInfo << chatId << msgId;
         }
         catch (const sqlite::sqlite_exception& ex)
         {
@@ -1747,8 +1764,8 @@ void MessageCache::PerformFetchMessagesFrom(const std::string& p_ProfileId, cons
         chatMessage.text = DecryptSensitiveField(text);
         chatMessage.quotedId = quotedId;
         chatMessage.quotedText = DecryptSensitiveField(quotedText);
-        chatMessage.quotedSender = quotedSender;
-        chatMessage.fileInfo = fileInfo;
+        chatMessage.quotedSender = DecryptSensitiveField(quotedSender);
+        chatMessage.fileInfo = DecryptSensitiveField(fileInfo);
         chatMessage.timeSent = timeSent;
         chatMessage.isOutgoing = isOutgoing;
         chatMessage.isRead = isRead;
@@ -1790,8 +1807,8 @@ void MessageCache::PerformFetchOneMessage(const std::string& p_ProfileId, const 
         chatMessage.text = DecryptSensitiveField(text);
         chatMessage.quotedId = quotedId;
         chatMessage.quotedText = DecryptSensitiveField(quotedText);
-        chatMessage.quotedSender = quotedSender;
-        chatMessage.fileInfo = fileInfo;
+        chatMessage.quotedSender = DecryptSensitiveField(quotedSender);
+        chatMessage.fileInfo = DecryptSensitiveField(fileInfo);
         chatMessage.timeSent = timeSent;
         chatMessage.isOutgoing = isOutgoing;
         chatMessage.isRead = isRead;
@@ -1809,6 +1826,150 @@ void MessageCache::PerformFetchOneMessage(const std::string& p_ProfileId, const 
   {
     HANDLE_SQLITE_EXCEPTION(ex);
   }
+}
+
+
+bool MessageCache::MigrateSensitiveData(const std::string& p_ProfileId)
+{
+  auto it = m_Dbs.find(p_ProfileId);
+  if ((it == m_Dbs.end()) || !it->second)
+  {
+    LOG_WARNING("migration skipped, db handle missing for %s", p_ProfileId.c_str());
+    return false;
+  }
+
+  if (!CryptoUtil::IsReady())
+  {
+    LOG_WARNING("crypto not ready, cannot migrate sensitive data for %s", p_ProfileId.c_str());
+    return false;
+  }
+
+  sqlite::database& db = *(it->second);
+
+  try
+  {
+    db << "BEGIN;";
+
+    std::vector<std::pair<std::string, std::string>> contactNameUpdates;
+    std::vector<std::pair<std::string, std::string>> contactPhoneUpdates;
+    db << "SELECT id, name, phone FROM " + s_TableContacts + ";" >>
+      [&](const std::string& id, const std::string& name, const std::string& phone)
+      {
+        if (!name.empty() && !HasEncryptedPrefix(name))
+        {
+          const std::string encName = EncryptSensitiveField(name);
+          if (HasEncryptedPrefix(encName))
+          {
+            contactNameUpdates.emplace_back(id, encName);
+          }
+        }
+
+        if (!phone.empty() && !HasEncryptedPrefix(phone))
+        {
+          const std::string encPhone = EncryptSensitiveField(phone);
+          if (HasEncryptedPrefix(encPhone))
+          {
+            contactPhoneUpdates.emplace_back(id, encPhone);
+          }
+        }
+      };
+
+    for (const auto& update : contactNameUpdates)
+    {
+      db << "UPDATE " + s_TableContacts + " SET name = ? WHERE id = ?;" << update.second << update.first;
+    }
+
+    for (const auto& update : contactPhoneUpdates)
+    {
+      db << "UPDATE " + s_TableContacts + " SET phone = ? WHERE id = ?;" << update.second << update.first;
+    }
+
+    struct MessageUpdate
+    {
+      std::string chatId;
+      std::string msgId;
+      std::string quotedSender;
+      std::string fileInfo;
+      bool hasQuotedSender = false;
+      bool hasFileInfo = false;
+    };
+
+    std::vector<MessageUpdate> messageUpdates;
+    db << "SELECT chatId, id, quotedSender, fileInfo FROM " + s_TableMessages + ";" >>
+      [&](const std::string& chatId, const std::string& msgId,
+          const std::string& quotedSender, const std::string& fileInfo)
+      {
+        MessageUpdate update;
+        update.chatId = chatId;
+        update.msgId = msgId;
+
+        if (!quotedSender.empty() && !HasEncryptedPrefix(quotedSender))
+        {
+          const std::string encQuoted = EncryptSensitiveField(quotedSender);
+          if (HasEncryptedPrefix(encQuoted))
+          {
+            update.quotedSender = encQuoted;
+            update.hasQuotedSender = true;
+          }
+        }
+
+        if (!fileInfo.empty() && !HasEncryptedPrefix(fileInfo))
+        {
+          const std::string encFileInfo = EncryptSensitiveField(fileInfo);
+          if (HasEncryptedPrefix(encFileInfo))
+          {
+            update.fileInfo = encFileInfo;
+            update.hasFileInfo = true;
+          }
+        }
+
+        if (update.hasQuotedSender || update.hasFileInfo)
+        {
+          messageUpdates.push_back(std::move(update));
+        }
+      };
+
+    for (const auto& update : messageUpdates)
+    {
+      if (update.hasQuotedSender && update.hasFileInfo)
+      {
+        db << "UPDATE " + s_TableMessages +
+          " SET quotedSender = ?, fileInfo = ? WHERE chatId = ? AND id = ?;"
+           << update.quotedSender << update.fileInfo << update.chatId << update.msgId;
+      }
+      else if (update.hasQuotedSender)
+      {
+        db << "UPDATE " + s_TableMessages +
+          " SET quotedSender = ? WHERE chatId = ? AND id = ?;"
+           << update.quotedSender << update.chatId << update.msgId;
+      }
+      else if (update.hasFileInfo)
+      {
+        db << "UPDATE " + s_TableMessages +
+          " SET fileInfo = ? WHERE chatId = ? AND id = ?;"
+           << update.fileInfo << update.chatId << update.msgId;
+      }
+    }
+
+    db << "COMMIT;";
+
+    LOG_INFO("migrated sensitive data: %zu contact names, %zu contact phones, %zu messages",
+             contactNameUpdates.size(), contactPhoneUpdates.size(), messageUpdates.size());
+  }
+  catch (const sqlite::sqlite_exception& ex)
+  {
+    HANDLE_SQLITE_EXCEPTION(ex);
+    try
+    {
+      db << "ROLLBACK;";
+    }
+    catch (...)
+    {
+    }
+    return false;
+  }
+
+  return true;
 }
 
 void MessageCache::CallMessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMessage)

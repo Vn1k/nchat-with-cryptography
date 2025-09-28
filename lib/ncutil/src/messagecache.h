@@ -242,6 +242,7 @@ private:
                                        std::vector<ChatMessage>& p_ChatMessages);
   static void PerformFetchOneMessage(const std::string& p_ProfileId, const std::string& p_ChatId,
                                      const std::string& p_MsgId, std::vector<ChatMessage>& p_ChatMessages);
+  static bool MigrateSensitiveData(const std::string& p_ProfileId);
 
   static void CallMessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMessage);
   static std::string EncryptSensitiveField(const std::string& p_Value);
