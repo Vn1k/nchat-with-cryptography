@@ -17,6 +17,7 @@
 #include "messagecache.h"
 #include "cryptoutil.h"
 #include "uimessagedialog.h"
+#include "uitextinputdialog.h"
 #include "timeutil.h"
 #include "uicolorconfig.h"
 #include "uiconfig.h"
@@ -67,14 +68,49 @@ void Ui::Init()
 
   if (!CryptoUtil::IsReady())
   {
-    const std::string warningText =
-      "Local chat cache encryption is DISABLED.\n\n"
-      "Set NCHAT_KEY_PASSPHRASE and restart nchat\n"
-      "to unlock or wrap the cache key.\n\n"
-      "Press Enter to continue without encryption.";
-    UiDialogParams params(m_Model.get(), "Security Warning", 0.85f, 7.0f);
-    UiMessageDialog dialog(params, warningText);
-    dialog.Run();
+    bool unlocked = false;
+    while (true)
+    {
+      UiDialogParams promptParams(m_Model.get(), "Unlock Cache", 0.75f, 6.0f);
+      UiTextInputDialog passphraseDialog(promptParams, "Please input passphrase: ", "");
+      passphraseDialog.SetFooter("Press Enter to submit or Esc to skip");
+      if (!passphraseDialog.Run())
+      {
+        CryptoUtil::SetPassphrase("");
+        break;
+      }
+
+      const std::string passphrase = passphraseDialog.GetInput();
+      CryptoUtil::SetPassphrase(passphrase);
+      if (CryptoUtil::IsReady())
+      {
+        unlocked = true;
+        break;
+      }
+
+      if (passphrase.empty())
+      {
+        CryptoUtil::SetPassphrase("");
+        break;
+      }
+
+      UiDialogParams errorParams(m_Model.get(), "Unlock Failed", 0.7f, 5.0f);
+      UiMessageDialog errorDialog(errorParams,
+                                  "Unable to unlock cache key with the provided passphrase.");
+      errorDialog.SetFooter("Press Enter to try again");
+      errorDialog.Run();
+    }
+
+    if (!unlocked)
+    {
+      const std::string warningText =
+        "Local chat cache encryption is DISABLED.\n\n"
+        "Cached messages will be stored unencrypted because the passphrase was skipped or invalid.\n\n"
+        "Press Enter to continue.";
+      UiDialogParams warnParams(m_Model.get(), "Security Warning", 0.85f, 7.0f);
+      UiMessageDialog warningDialog(warnParams, warningText);
+      warningDialog.Run();
+    }
   }
 }
 

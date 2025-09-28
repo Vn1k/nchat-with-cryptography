@@ -59,6 +59,15 @@ void CryptoUtil::Init(const std::string& p_KeyPath)
   }
 }
 
+void CryptoUtil::SetPassphrase(const std::string& p_Passphrase)
+{
+  std::lock_guard<std::mutex> lock(m_KeyMutex);
+  m_Passphrase = p_Passphrase;
+  m_UsePassphrase = !m_Passphrase.empty();
+  m_KeyLoaded = false;
+  m_Key.clear();
+}
+
 bool CryptoUtil::IsReady()
 {
   return EnsureKey();
