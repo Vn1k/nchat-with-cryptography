@@ -11,6 +11,7 @@
 #include <set>
 #include <string>
 
+#include <algorithm>
 #include <cassert>
 #include <iterator>
 #include <dlfcn.h>
@@ -150,8 +151,7 @@ int main(int argc, char* argv[])
   bool isKeyDump = false;
   bool isRemove = false;
   bool isSetup = false;
-  std::string cliPassphrase;
-  bool hasCliPassphrase = false;
+  bool requestSetPassphrase = false;
   bool isChangePassphrase = false;
   std::vector<std::string> args(argv + 1, argv + argc);
   for (auto it = args.begin(); it != args.end(); ++it)
@@ -188,11 +188,15 @@ int main(int argc, char* argv[])
       sleep(5);
       AppUtil::SetDeveloperMode(true);
     }
-    else if (((*it == "-p") || (*it == "--passphrase")) && (std::distance(it + 1, args.end()) > 0))
+    else if ((*it == "-p") || (*it == "--passphrase"))
     {
-      ++it;
-      cliPassphrase = *it;
-      hasCliPassphrase = true;
+      auto nextIt = std::next(it);
+      if ((nextIt != args.end()) && !nextIt->empty() && (nextIt->front() != '-'))
+      {
+        std::cerr << "error: --passphrase does not take a value (prompt will ask interactively)" << std::endl;
+        return 1;
+      }
+      requestSetPassphrase = true;
     }
     else if ((*it == "-P") || (*it == "--change-passphrase"))
     {
@@ -229,7 +233,7 @@ int main(int argc, char* argv[])
     }
   }
 
-  if (hasCliPassphrase && isChangePassphrase)
+  if (requestSetPassphrase && isChangePassphrase)
   {
     std::cerr << "error: --passphrase cannot be combined with --change-passphrase" << std::endl;
     return 1;
@@ -392,7 +396,7 @@ int main(int argc, char* argv[])
     return 0;
   }
 
-  if (hasCliPassphrase)
+  if (requestSetPassphrase)
   {
     if (CryptoUtil::IsPassphraseProtected())
     {
@@ -405,11 +409,52 @@ int main(int argc, char* argv[])
       return 1;
     }
 
-    CryptoUtil::SetPassphrase(cliPassphrase);
+    std::cout << "Enter new passphrase: ";
+    std::cout.flush();
+    std::string newPass = StrUtil::GetPass();
+    std::cout << "Confirm new passphrase: ";
+    std::cout.flush();
+    std::string confirmPass = StrUtil::GetPass();
+
+    if (newPass.empty())
+    {
+      std::cout << "Passphrase cannot be empty." << std::endl;
+      MessageCache::Cleanup();
+      AppConfig::Cleanup();
+      Profiles::Cleanup();
+      LOG_INFO("exit");
+      Log::Cleanup(isLogdumpEnabled);
+      return 1;
+    }
+
+    if (newPass != confirmPass)
+    {
+      std::cout << "Passphrases do not match." << std::endl;
+      MessageCache::Cleanup();
+      AppConfig::Cleanup();
+      Profiles::Cleanup();
+      LOG_INFO("exit");
+      Log::Cleanup(isLogdumpEnabled);
+      return 1;
+    }
+
+    CryptoUtil::SetPassphrase(newPass);
+    std::fill(confirmPass.begin(), confirmPass.end(), '\0');
+    std::fill(newPass.begin(), newPass.end(), '\0');
+    confirmPass.clear();
+    newPass.clear();
     if (!CryptoUtil::IsReady())
     {
-      LOG_WARNING("CLI provided passphrase failed to unlock cache key");
+      std::cout << "Failed to set cache key passphrase. Check log for details." << std::endl;
+      MessageCache::Cleanup();
+      AppConfig::Cleanup();
+      Profiles::Cleanup();
+      LOG_INFO("exit");
+      Log::Cleanup(isLogdumpEnabled);
+      return 1;
     }
+
+    std::cout << "Cache key passphrase set." << std::endl;
   }
 
   // Run setup if required
@@ -731,7 +776,7 @@ void ShowHelp()
     "    -h, --help             display this help and exit\n"
     "    -k, --keydump          key code dump mode\n"
     "    -m, --devmode          developer mode\n"
-    "    -p, --passphrase <PW>  set passphrase for cache key\n"
+    "    -p, --passphrase       set passphrase for cache key (interactive)\n"
     "    -P, --change-passphrase  change or remove existing cache key passphrase (interactive)\n"
     "    -r, --remove           remove chat protocol account\n"
     "    -s, --setup            set up chat protocol account\n"
