@@ -11,7 +11,9 @@
 #include <set>
 #include <string>
 
+#include <algorithm>
 #include <cassert>
+#include <iterator>
 #include <dlfcn.h>
 
 #include <path.hpp>
@@ -26,6 +28,15 @@
 #include "status.h"
 #include "sysutil.h"
 #include "ui.h"
+#include "strutil.h"
+#include "cryptoutil.h"
+
+#ifndef GO_VERSION
+#define GO_VERSION "unknown"
+#endif
+#ifndef GO_VERSION_MIN
+#define GO_VERSION_MIN "unknown"
+#endif
 
 #ifdef HAS_DUMMY
 #include "duchat.h"
@@ -140,6 +151,8 @@ int main(int argc, char* argv[])
   bool isKeyDump = false;
   bool isRemove = false;
   bool isSetup = false;
+  bool requestSetPassphrase = false;
+  bool isChangePassphrase = false;
   std::vector<std::string> args(argv + 1, argv + argc);
   for (auto it = args.begin(); it != args.end(); ++it)
   {
@@ -175,6 +188,26 @@ int main(int argc, char* argv[])
       sleep(5);
       AppUtil::SetDeveloperMode(true);
     }
+    else if ((*it == "-p") || (*it == "--passphrase"))
+    {
+      auto nextIt = std::next(it);
+      if ((nextIt != args.end()) && !nextIt->empty() && (nextIt->front() != '-'))
+      {
+        std::cerr << "error: --passphrase does not take a value (prompt will ask interactively)" << std::endl;
+        return 1;
+      }
+      requestSetPassphrase = true;
+    }
+    else if ((*it == "-P") || (*it == "--change-passphrase"))
+    {
+      auto nextIt = std::next(it);
+      if ((nextIt != args.end()) && !nextIt->empty() && (nextIt->front() != '-'))
+      {
+        std::cerr << "error: --change-passphrase does not take a value" << std::endl;
+        return 1;
+      }
+      isChangePassphrase = true;
+    }
     else if ((*it == "-r") || (*it == "--remove"))
     {
       isRemove = true;
@@ -198,6 +231,12 @@ int main(int argc, char* argv[])
       ShowHelp();
       return 1;
     }
+  }
+
+  if (requestSetPassphrase && isChangePassphrase)
+  {
+    std::cerr << "error: --passphrase cannot be combined with --change-passphrase" << std::endl;
+    return 1;
   }
 
   bool isDirInited = false;
@@ -293,6 +332,148 @@ int main(int argc, char* argv[])
 
   // Init message cache
   MessageCache::Init();
+
+  if (isChangePassphrase)
+  {
+    const std::string keyPath = FileUtil::GetApplicationDir() + "/cache.key";
+    if (!FileUtil::Exists(keyPath))
+    {
+      std::cout << "No cache key found to update." << std::endl;
+      MessageCache::Cleanup();
+      AppConfig::Cleanup();
+      Profiles::Cleanup();
+      LOG_INFO("exit");
+      Log::Cleanup(isLogdumpEnabled);
+      return 1;
+    }
+
+    std::cout << "Enter current passphrase (leave empty if none): ";
+    std::cout.flush();
+    std::string currentPass = StrUtil::GetPass();
+    std::cout << "Enter new passphrase (leave empty to disable): ";
+    std::cout.flush();
+    std::string newPass = StrUtil::GetPass();
+    std::cout << "Confirm new passphrase: ";
+    std::cout.flush();
+    std::string confirmPass = StrUtil::GetPass();
+
+    auto passCleanup = [&]()
+    {
+      StrUtil::SecureZero(currentPass);
+      StrUtil::SecureZero(newPass);
+      StrUtil::SecureZero(confirmPass);
+    };
+
+    if (!StrUtil::ConstTimeEquals(newPass, confirmPass))
+    {
+      std::cout << "Passphrases do not match." << std::endl;
+      passCleanup();
+      MessageCache::Cleanup();
+      AppConfig::Cleanup();
+      Profiles::Cleanup();
+      LOG_INFO("exit");
+      Log::Cleanup(isLogdumpEnabled);
+      return 1;
+    }
+
+    const bool removingPassphrase = newPass.empty();
+    bool changeSuccess = CryptoUtil::ChangePassphrase(currentPass, newPass);
+    passCleanup();
+
+    if (!changeSuccess)
+    {
+      std::cout << "Failed to update cache key passphrase. Check log for details." << std::endl;
+      MessageCache::Cleanup();
+      AppConfig::Cleanup();
+      Profiles::Cleanup();
+      LOG_INFO("exit");
+      Log::Cleanup(isLogdumpEnabled);
+      return 1;
+    }
+
+    if (removingPassphrase)
+    {
+      std::cout << "Cache key passphrase removed." << std::endl;
+    }
+    else
+    {
+      std::cout << "Cache key passphrase updated." << std::endl;
+    }
+
+    MessageCache::Cleanup();
+    AppConfig::Cleanup();
+    Profiles::Cleanup();
+    LOG_INFO("exit");
+    Log::Cleanup(isLogdumpEnabled);
+    return 0;
+  }
+
+  if (requestSetPassphrase)
+  {
+    if (CryptoUtil::IsPassphraseProtected())
+    {
+      std::cout << "Cache key already passphrase protected. Use --change-passphrase to update it." << std::endl;
+      MessageCache::Cleanup();
+      AppConfig::Cleanup();
+      Profiles::Cleanup();
+      LOG_INFO("exit");
+      Log::Cleanup(isLogdumpEnabled);
+      return 1;
+    }
+
+    std::cout << "Enter new passphrase: ";
+    std::cout.flush();
+    std::string newPass = StrUtil::GetPass();
+    std::cout << "Confirm new passphrase: ";
+    std::cout.flush();
+    std::string confirmPass = StrUtil::GetPass();
+
+    auto newPassCleanup = [&]()
+    {
+      StrUtil::SecureZero(newPass);
+      StrUtil::SecureZero(confirmPass);
+    };
+
+    if (newPass.empty())
+    {
+      std::cout << "Passphrase cannot be empty." << std::endl;
+      newPassCleanup();
+      MessageCache::Cleanup();
+      AppConfig::Cleanup();
+      Profiles::Cleanup();
+      LOG_INFO("exit");
+      Log::Cleanup(isLogdumpEnabled);
+      return 1;
+    }
+
+    if (!StrUtil::ConstTimeEquals(newPass, confirmPass))
+    {
+      std::cout << "Passphrases do not match." << std::endl;
+      newPassCleanup();
+      MessageCache::Cleanup();
+      AppConfig::Cleanup();
+      Profiles::Cleanup();
+      LOG_INFO("exit");
+      Log::Cleanup(isLogdumpEnabled);
+      return 1;
+    }
+
+    CryptoUtil::SetPassphrase(newPass);
+    bool ready = CryptoUtil::IsReady();
+    newPassCleanup();
+    if (!ready)
+    {
+      std::cout << "Failed to set cache key passphrase. Check log for details." << std::endl;
+      MessageCache::Cleanup();
+      AppConfig::Cleanup();
+      Profiles::Cleanup();
+      LOG_INFO("exit");
+      Log::Cleanup(isLogdumpEnabled);
+      return 1;
+    }
+
+    std::cout << "Cache key passphrase set." << std::endl;
+  }
 
   // Run setup if required
   std::shared_ptr<Protocol> setupProtocol;
@@ -613,6 +794,8 @@ void ShowHelp()
     "    -h, --help             display this help and exit\n"
     "    -k, --keydump          key code dump mode\n"
     "    -m, --devmode          developer mode\n"
+    "    -p, --passphrase       set passphrase for cache key (interactive)\n"
+    "    -P, --change-passphrase  change or remove existing cache key passphrase (interactive)\n"
     "    -r, --remove           remove chat protocol account\n"
     "    -s, --setup            set up chat protocol account\n"
     "    -v, --version          output version information and exit\n"

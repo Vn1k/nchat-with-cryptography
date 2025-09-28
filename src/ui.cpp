@@ -15,7 +15,11 @@
 #include "emojilist.h"
 #include "log.h"
 #include "messagecache.h"
+#include "cryptoutil.h"
+#include "uimessagedialog.h"
+#include "uitextinputdialog.h"
 #include "timeutil.h"
+#include "strutil.h"
 #include "uicolorconfig.h"
 #include "uiconfig.h"
 #include "uicontroller.h"
@@ -62,6 +66,56 @@ void Ui::Init()
   UiColorConfig::Init();
   m_Model->Init();
   m_Controller->Init();
+
+  if (!CryptoUtil::IsReady())
+  {
+    bool unlocked = false;
+    while (true)
+    {
+      UiDialogParams promptParams(m_Model.get(), "Unlock Cache", 0.75f, 6.0f);
+      UiTextInputDialog passphraseDialog(promptParams, "Please input passphrase: ", "");
+      passphraseDialog.SetFooter("Press Enter to submit or Esc to skip");
+      if (!passphraseDialog.Run())
+      {
+        CryptoUtil::SetPassphrase("");
+        break;
+      }
+
+      std::string passphrase = passphraseDialog.GetInput();
+      const bool passphraseEmpty = passphrase.empty();
+      CryptoUtil::SetPassphrase(passphrase);
+      bool ready = CryptoUtil::IsReady();
+      StrUtil::SecureZero(passphrase);
+      if (ready)
+      {
+        unlocked = true;
+        break;
+      }
+
+      if (passphraseEmpty)
+      {
+        CryptoUtil::SetPassphrase("");
+        break;
+      }
+
+      UiDialogParams errorParams(m_Model.get(), "Unlock Failed", 0.7f, 5.0f);
+      UiMessageDialog errorDialog(errorParams,
+                                  "Unable to unlock cache key with the provided passphrase.");
+      errorDialog.SetFooter("Press Enter to try again");
+      errorDialog.Run();
+    }
+
+    if (!unlocked)
+    {
+      const std::string warningText =
+        "Local chat cache encryption is DISABLED.\n\n"
+        "Cached messages will be stored unencrypted because the passphrase was skipped or invalid.\n\n"
+        "Press Enter to continue.";
+      UiDialogParams warnParams(m_Model.get(), "Security Warning", 0.85f, 7.0f);
+      UiMessageDialog warningDialog(warnParams, warningText);
+      warningDialog.Run();
+    }
+  }
 }
 
 void Ui::Cleanup()

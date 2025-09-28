@@ -93,6 +93,11 @@ void UiTextInputDialog::KeyHandler(wint_t p_Key)
     m_Model->SetHelpOffset(m_Model->GetHelpOffset() + 1);
     m_Model->Draw();
   }
+  else if (p_Key == 27)
+  {
+    m_Result = false;
+    m_Running = false;
+  }
   else
   {
     EntryKeyHandler(p_Key);

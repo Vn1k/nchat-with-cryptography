@@ -17,6 +17,7 @@ find_path(MAGIC_INCLUDE_DIR magic.h
   /usr/include
 )
 find_package(SQLite3 REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Platform specifics
 if (${CMAKE_SYSTEM_NAME} MATCHES "Android")
@@ -35,6 +36,8 @@ add_library(ncutil ${LIBRARY_LINKING_TYPE}
   src/clipboard.h
   src/config.cpp
   src/config.h
+  src/cryptoutil.cpp
+  src/cryptoutil.h
   src/emojilist.cpp
   src/emojilist.h
   src/emojiutil.cpp
@@ -95,4 +98,4 @@ set_target_properties(ncutil PROPERTIES COMPILE_FLAGS
                        -Wcast-align")
 
 # Linking
-target_link_libraries(ncutil PUBLIC ${MAGIC_LIBRARY} SQLite::SQLite3 clip ${WORDEXP_LIBRARY})
+target_link_libraries(ncutil PUBLIC ${MAGIC_LIBRARY} SQLite::SQLite3 clip OpenSSL::Crypto ${WORDEXP_LIBRARY})
