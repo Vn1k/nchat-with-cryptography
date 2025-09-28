@@ -29,6 +29,8 @@ public:
   static bool IsInteger(const std::string& p_Str);
   static bool IsValidTextKey(int p_Key);
   static std::string Join(const std::vector<std::string>& p_Lines, const std::string& p_Delim);
+  static bool ConstTimeEquals(const std::string& p_A, const std::string& p_B);
+  static void SecureZero(std::string& p_Str);
   static std::wstring Join(const std::vector<std::wstring>& p_Lines, const std::wstring& p_Delim);
   static void JumpToNextMatch(std::wstring& p_Str, int& p_Pos, int p_Offs, std::wstring p_Chars);
   static void JumpToPrevMatch(std::wstring& p_Str, int& p_Pos, int p_Offs, std::wstring p_Chars);

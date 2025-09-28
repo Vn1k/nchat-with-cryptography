@@ -14,6 +14,7 @@
 #include <locale>
 #include <regex>
 #include <string>
+#include <algorithm>
 
 #include <termios.h>
 #include <unistd.h>
@@ -138,9 +139,11 @@ std::string StrUtil::GetPass()
       std::getline(std::cin, pass);
       tcsetattr(STDIN_FILENO, TCSAFLUSH, &told);
       std::cout << std::endl;
+      return pass;
     }
   }
 
+  std::getline(std::cin, pass);
   return pass;
 }
 
@@ -207,6 +210,34 @@ std::string StrUtil::Join(const std::vector<std::string>& p_Lines, const std::st
     str += line;
   }
   return str;
+}
+
+void StrUtil::SecureZero(std::string& p_Str)
+{
+  if (p_Str.empty()) return;
+
+  volatile char* data = reinterpret_cast<volatile char*>(const_cast<char*>(p_Str.data()));
+  for (size_t i = 0; i < p_Str.size(); ++i)
+  {
+    data[i] = 0;
+  }
+
+  p_Str.clear();
+}
+
+bool StrUtil::ConstTimeEquals(const std::string& p_A, const std::string& p_B)
+{
+  const size_t maxSize = std::max(p_A.size(), p_B.size());
+  unsigned char diff = static_cast<unsigned char>(p_A.size() ^ p_B.size());
+
+  for (size_t i = 0; i < maxSize; ++i)
+  {
+    unsigned char a = (i < p_A.size()) ? static_cast<unsigned char>(p_A[i]) : 0;
+    unsigned char b = (i < p_B.size()) ? static_cast<unsigned char>(p_B[i]) : 0;
+    diff |= static_cast<unsigned char>(a ^ b);
+  }
+
+  return diff == 0;
 }
 
 std::wstring StrUtil::Join(const std::vector<std::wstring>& p_Lines, const std::wstring& p_Delim)

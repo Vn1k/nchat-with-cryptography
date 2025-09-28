@@ -31,6 +31,10 @@ private:
   static bool DerivePassphraseKey(const std::string& p_Passphrase,
                                   const std::vector<unsigned char>& p_Salt,
                                   std::vector<unsigned char>& p_Derived);
+  static void ClearKeyLocked();
+  static void LockKeyMemory();
+  static void UnlockKeyMemory();
+  static void SecureZero(std::vector<unsigned char>& p_Data);
 
 private:
   static std::string m_KeyPath;
@@ -39,4 +43,5 @@ private:
   static std::mutex m_KeyMutex;
   static bool m_UsePassphrase;
   static std::string m_Passphrase;
+  static bool m_KeyLocked;
 };

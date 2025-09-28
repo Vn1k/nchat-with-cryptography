@@ -357,9 +357,17 @@ int main(int argc, char* argv[])
     std::cout.flush();
     std::string confirmPass = StrUtil::GetPass();
 
-    if (newPass != confirmPass)
+    auto passCleanup = [&]()
+    {
+      StrUtil::SecureZero(currentPass);
+      StrUtil::SecureZero(newPass);
+      StrUtil::SecureZero(confirmPass);
+    };
+
+    if (!StrUtil::ConstTimeEquals(newPass, confirmPass))
     {
       std::cout << "Passphrases do not match." << std::endl;
+      passCleanup();
       MessageCache::Cleanup();
       AppConfig::Cleanup();
       Profiles::Cleanup();
@@ -368,7 +376,11 @@ int main(int argc, char* argv[])
       return 1;
     }
 
-    if (!CryptoUtil::ChangePassphrase(currentPass, newPass))
+    const bool removingPassphrase = newPass.empty();
+    bool changeSuccess = CryptoUtil::ChangePassphrase(currentPass, newPass);
+    passCleanup();
+
+    if (!changeSuccess)
     {
       std::cout << "Failed to update cache key passphrase. Check log for details." << std::endl;
       MessageCache::Cleanup();
@@ -379,7 +391,7 @@ int main(int argc, char* argv[])
       return 1;
     }
 
-    if (newPass.empty())
+    if (removingPassphrase)
     {
       std::cout << "Cache key passphrase removed." << std::endl;
     }
@@ -416,9 +428,16 @@ int main(int argc, char* argv[])
     std::cout.flush();
     std::string confirmPass = StrUtil::GetPass();
 
+    auto newPassCleanup = [&]()
+    {
+      StrUtil::SecureZero(newPass);
+      StrUtil::SecureZero(confirmPass);
+    };
+
     if (newPass.empty())
     {
       std::cout << "Passphrase cannot be empty." << std::endl;
+      newPassCleanup();
       MessageCache::Cleanup();
       AppConfig::Cleanup();
       Profiles::Cleanup();
@@ -427,9 +446,10 @@ int main(int argc, char* argv[])
       return 1;
     }
 
-    if (newPass != confirmPass)
+    if (!StrUtil::ConstTimeEquals(newPass, confirmPass))
     {
       std::cout << "Passphrases do not match." << std::endl;
+      newPassCleanup();
       MessageCache::Cleanup();
       AppConfig::Cleanup();
       Profiles::Cleanup();
@@ -439,11 +459,9 @@ int main(int argc, char* argv[])
     }
 
     CryptoUtil::SetPassphrase(newPass);
-    std::fill(confirmPass.begin(), confirmPass.end(), '\0');
-    std::fill(newPass.begin(), newPass.end(), '\0');
-    confirmPass.clear();
-    newPass.clear();
-    if (!CryptoUtil::IsReady())
+    bool ready = CryptoUtil::IsReady();
+    newPassCleanup();
+    if (!ready)
     {
       std::cout << "Failed to set cache key passphrase. Check log for details." << std::endl;
       MessageCache::Cleanup();

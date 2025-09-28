@@ -19,6 +19,7 @@
 #include "uimessagedialog.h"
 #include "uitextinputdialog.h"
 #include "timeutil.h"
+#include "strutil.h"
 #include "uicolorconfig.h"
 #include "uiconfig.h"
 #include "uicontroller.h"
@@ -80,15 +81,18 @@ void Ui::Init()
         break;
       }
 
-      const std::string passphrase = passphraseDialog.GetInput();
+      std::string passphrase = passphraseDialog.GetInput();
+      const bool passphraseEmpty = passphrase.empty();
       CryptoUtil::SetPassphrase(passphrase);
-      if (CryptoUtil::IsReady())
+      bool ready = CryptoUtil::IsReady();
+      StrUtil::SecureZero(passphrase);
+      if (ready)
       {
         unlocked = true;
         break;
       }
 
-      if (passphrase.empty())
+      if (passphraseEmpty)
       {
         CryptoUtil::SetPassphrase("");
         break;

@@ -11,11 +11,16 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
+#include <algorithm>
 #include <sys/stat.h>
 
 #include <cstdlib>
 #include <sstream>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
+#endif
 
 #include "fileutil.h"
 #include "log.h"
@@ -38,14 +43,16 @@ bool CryptoUtil::m_KeyLoaded = false;
 std::mutex CryptoUtil::m_KeyMutex;
 bool CryptoUtil::m_UsePassphrase = false;
 std::string CryptoUtil::m_Passphrase;
+bool CryptoUtil::m_KeyLocked = false;
 
 void CryptoUtil::Init(const std::string& p_KeyPath)
 {
   std::lock_guard<std::mutex> lock(m_KeyMutex);
   m_KeyPath = p_KeyPath;
-  m_Key.clear();
+  ClearKeyLocked();
   m_KeyLoaded = false;
 
+  StrUtil::SecureZero(m_Passphrase);
   const char* passphraseEnv = getenv(PASSPHRASE_ENV);
   if ((passphraseEnv != nullptr) && (passphraseEnv[0] != '\0'))
   {
@@ -57,15 +64,22 @@ void CryptoUtil::Init(const std::string& p_KeyPath)
     m_Passphrase.clear();
     m_UsePassphrase = false;
   }
+
+#if defined(_WIN32)
+  _putenv_s(PASSPHRASE_ENV, "");
+#else
+  unsetenv(PASSPHRASE_ENV);
+#endif
 }
 
 void CryptoUtil::SetPassphrase(const std::string& p_Passphrase)
 {
   std::lock_guard<std::mutex> lock(m_KeyMutex);
+  StrUtil::SecureZero(m_Passphrase);
   m_Passphrase = p_Passphrase;
   m_UsePassphrase = !m_Passphrase.empty();
   m_KeyLoaded = false;
-  m_Key.clear();
+  ClearKeyLocked();
 }
 
 bool CryptoUtil::IsPassphraseProtected()
@@ -88,50 +102,70 @@ bool CryptoUtil::ChangePassphrase(const std::string& p_OldPassphrase,
     return false;
   }
 
-  const std::string prevPassphrase = m_Passphrase;
+  std::string prevPassphrase = m_Passphrase;
   const bool prevUsePassphrase = m_UsePassphrase;
   const bool prevKeyLoaded = m_KeyLoaded;
-  const std::vector<unsigned char> prevKey = m_Key;
+  std::vector<unsigned char> prevKey = m_Key;
 
+  StrUtil::SecureZero(m_Passphrase);
   m_Passphrase = p_OldPassphrase;
   m_UsePassphrase = !m_Passphrase.empty();
-  m_Key.clear();
+  ClearKeyLocked();
   m_KeyLoaded = false;
 
   if (!LoadKeyLocked())
   {
     LOG_WARNING("failed to unlock cache key with provided passphrase");
+    StrUtil::SecureZero(m_Passphrase);
     m_Passphrase = prevPassphrase;
     m_UsePassphrase = prevUsePassphrase;
+    ClearKeyLocked();
     m_Key = prevKey;
+    LockKeyMemory();
     m_KeyLoaded = prevKeyLoaded;
+    StrUtil::SecureZero(prevPassphrase);
+    SecureZero(prevKey);
     return false;
   }
 
   m_KeyLoaded = true;
   std::vector<unsigned char> keyPlain = m_Key;
 
+  StrUtil::SecureZero(m_Passphrase);
   m_Passphrase = p_NewPassphrase;
   m_UsePassphrase = !m_Passphrase.empty();
 
   if (!PersistKeyLocked(keyPlain))
   {
     LOG_WARNING("failed to persist cache key with new passphrase");
+    StrUtil::SecureZero(m_Passphrase);
     m_Passphrase = p_OldPassphrase;
     m_UsePassphrase = !m_Passphrase.empty();
     if (!PersistKeyLocked(keyPlain))
     {
       LOG_WARNING("failed to restore original cache key protection");
     }
+    StrUtil::SecureZero(m_Passphrase);
     m_Passphrase = prevPassphrase;
     m_UsePassphrase = prevUsePassphrase;
+    ClearKeyLocked();
     m_Key = prevKey;
+    LockKeyMemory();
     m_KeyLoaded = prevKeyLoaded;
+    SecureZero(keyPlain);
+    StrUtil::SecureZero(prevPassphrase);
+    SecureZero(prevKey);
     return false;
   }
 
+  ClearKeyLocked();
   m_Key = keyPlain;
+  LockKeyMemory();
   m_KeyLoaded = true;
+
+  SecureZero(keyPlain);
+  StrUtil::SecureZero(prevPassphrase);
+  SecureZero(prevKey);
   return true;
 }
 
@@ -355,10 +389,14 @@ bool CryptoUtil::LoadKeyLocked()
       if (!DecryptStoredKey(keyData, keyCandidate))
       {
         LOG_WARNING("failed to decrypt stored encryption key");
+        SecureZero(keyCandidate);
         return false;
       }
 
+      ClearKeyLocked();
       m_Key = keyCandidate;
+      LockKeyMemory();
+      SecureZero(keyCandidate);
       return true;
     }
     else
@@ -373,11 +411,15 @@ bool CryptoUtil::LoadKeyLocked()
           if (!PersistKeyLocked(keyCandidate))
           {
             LOG_WARNING("failed to migrate encryption key to passphrase-protected storage");
+            SecureZero(keyCandidate);
             return false;
           }
         }
 
+        ClearKeyLocked();
         m_Key = keyCandidate;
+        LockKeyMemory();
+        SecureZero(keyCandidate);
         return true;
       }
 
@@ -389,15 +431,20 @@ bool CryptoUtil::LoadKeyLocked()
   if (RAND_bytes(key.data(), static_cast<int>(key.size())) != 1)
   {
     LOG_WARNING("failed to generate encryption key");
+    SecureZero(key);
     return false;
   }
 
   if (!PersistKeyLocked(key))
   {
+    SecureZero(key);
     return false;
   }
 
+  ClearKeyLocked();
   m_Key = key;
+  LockKeyMemory();
+  SecureZero(key);
   return true;
 }
 
@@ -665,4 +712,66 @@ bool CryptoUtil::DerivePassphraseKey(const std::string& p_Passphrase,
   }
 
   return true;
+}
+
+void CryptoUtil::ClearKeyLocked()
+{
+  if (m_Key.empty())
+  {
+    return;
+  }
+
+  UnlockKeyMemory();
+  SecureZero(m_Key);
+  m_Key.clear();
+}
+
+void CryptoUtil::LockKeyMemory()
+{
+#if defined(__unix__) || defined(__APPLE__)
+  if (m_Key.empty())
+  {
+    m_KeyLocked = false;
+    return;
+  }
+
+  if (!m_KeyLocked)
+  {
+    if (mlock(m_Key.data(), m_Key.size()) == 0)
+    {
+      m_KeyLocked = true;
+    }
+    else
+    {
+      m_KeyLocked = false;
+      LOG_WARNING("failed to lock encryption key in memory");
+    }
+  }
+#else
+  m_KeyLocked = false;
+#endif
+}
+
+void CryptoUtil::UnlockKeyMemory()
+{
+#if defined(__unix__) || defined(__APPLE__)
+  if (m_KeyLocked && !m_Key.empty())
+  {
+    munlock(m_Key.data(), m_Key.size());
+  }
+#endif
+  m_KeyLocked = false;
+}
+
+void CryptoUtil::SecureZero(std::vector<unsigned char>& p_Data)
+{
+  if (p_Data.empty()) return;
+
+  volatile unsigned char* data = reinterpret_cast<volatile unsigned char*>(p_Data.data());
+  for (size_t i = 0; i < p_Data.size(); ++i)
+  {
+    data[i] = 0;
+  }
+
+  p_Data.clear();
 }
