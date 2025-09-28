@@ -24,6 +24,7 @@
 #include "timeutil.h"
 #include "uidialog.h"
 #include "uichatlistdialog.h"
+#include "cryptoutil.h"
 #include "uiconfig.h"
 #include "uicontactlistdialog.h"
 #include "uicontroller.h"
@@ -40,6 +41,28 @@
 // ---------------------------------------------------------------------
 
 const std::pair<std::string, std::string> UiModel::Impl::s_ChatNone;
+
+namespace
+{
+  const char* const kEncryptedPrefix = "enc:";
+
+  std::string MakeLockedLabel(const std::string& value, const std::string& fallbackId)
+  {
+    const std::string& source = value.empty() ? fallbackId : value;
+    if (source.empty())
+    {
+      return std::string(kEncryptedPrefix) + "locked";
+    }
+
+    if (StrUtil::StartsWith(source, kEncryptedPrefix))
+    {
+      return source;
+    }
+
+    return std::string(kEncryptedPrefix) + StrUtil::StrToHex(source);
+  }
+}
+
 
 UiModel::Impl::Impl(UiModel* p_UiModel)
 {
@@ -2123,7 +2146,13 @@ std::string UiModel::Impl::GetContactName(const std::string& p_ProfileId, const 
   {
     return "You";
   }
-  else if (chatName.empty())
+
+  if (!CryptoUtil::IsReady())
+  {
+    return MakeLockedLabel(chatName, p_ChatId);
+  }
+
+  if (chatName.empty())
   {
     return p_ChatId;
   }
@@ -2135,6 +2164,12 @@ std::string UiModel::Impl::GetContactNameIncludingSelf(const std::string& p_Prof
 {
   const ContactInfo& contactInfo = m_ContactInfos[p_ProfileId][p_ChatId];
   const std::string& chatName = contactInfo.name;
+
+  if (!CryptoUtil::IsReady() && !contactInfo.isSelf)
+  {
+    return MakeLockedLabel(chatName, p_ChatId);
+  }
+
   if (chatName.empty())
   {
     if (contactInfo.isSelf)
@@ -2159,7 +2194,13 @@ std::string UiModel::Impl::GetContactListName(const std::string& p_ProfileId, co
   {
     return "Saved Messages";
   }
-  else if (p_AllowId && chatName.empty())
+
+  if (!CryptoUtil::IsReady())
+  {
+    return MakeLockedLabel(chatName, p_ChatId);
+  }
+
+  if (p_AllowId && chatName.empty())
   {
     return p_ChatId;
   }
@@ -2170,6 +2211,10 @@ std::string UiModel::Impl::GetContactListName(const std::string& p_ProfileId, co
 std::string UiModel::Impl::GetContactPhone(const std::string& p_ProfileId, const std::string& p_ChatId)
 {
   const ContactInfo& contactInfo = m_ContactInfos[p_ProfileId][p_ChatId];
+  if (!CryptoUtil::IsReady())
+  {
+    return "";
+  }
   return contactInfo.phone.empty() ? "" : "+" + contactInfo.phone;
 }
 
