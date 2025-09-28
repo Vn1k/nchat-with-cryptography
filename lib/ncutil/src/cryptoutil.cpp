@@ -68,6 +68,73 @@ void CryptoUtil::SetPassphrase(const std::string& p_Passphrase)
   m_Key.clear();
 }
 
+bool CryptoUtil::IsPassphraseProtected()
+{
+  std::lock_guard<std::mutex> lock(m_KeyMutex);
+  if (m_KeyPath.empty() || !FileUtil::Exists(m_KeyPath)) return false;
+
+  std::string keyData = FileUtil::ReadFile(m_KeyPath);
+  StrUtil::Trim(keyData);
+  return StrUtil::StartsWith(keyData, KEYFILE_MAGIC);
+}
+
+bool CryptoUtil::ChangePassphrase(const std::string& p_OldPassphrase,
+                                  const std::string& p_NewPassphrase)
+{
+  std::lock_guard<std::mutex> lock(m_KeyMutex);
+  if (m_KeyPath.empty())
+  {
+    LOG_WARNING("encryption key path not set");
+    return false;
+  }
+
+  const std::string prevPassphrase = m_Passphrase;
+  const bool prevUsePassphrase = m_UsePassphrase;
+  const bool prevKeyLoaded = m_KeyLoaded;
+  const std::vector<unsigned char> prevKey = m_Key;
+
+  m_Passphrase = p_OldPassphrase;
+  m_UsePassphrase = !m_Passphrase.empty();
+  m_Key.clear();
+  m_KeyLoaded = false;
+
+  if (!LoadKeyLocked())
+  {
+    LOG_WARNING("failed to unlock cache key with provided passphrase");
+    m_Passphrase = prevPassphrase;
+    m_UsePassphrase = prevUsePassphrase;
+    m_Key = prevKey;
+    m_KeyLoaded = prevKeyLoaded;
+    return false;
+  }
+
+  m_KeyLoaded = true;
+  std::vector<unsigned char> keyPlain = m_Key;
+
+  m_Passphrase = p_NewPassphrase;
+  m_UsePassphrase = !m_Passphrase.empty();
+
+  if (!PersistKeyLocked(keyPlain))
+  {
+    LOG_WARNING("failed to persist cache key with new passphrase");
+    m_Passphrase = p_OldPassphrase;
+    m_UsePassphrase = !m_Passphrase.empty();
+    if (!PersistKeyLocked(keyPlain))
+    {
+      LOG_WARNING("failed to restore original cache key protection");
+    }
+    m_Passphrase = prevPassphrase;
+    m_UsePassphrase = prevUsePassphrase;
+    m_Key = prevKey;
+    m_KeyLoaded = prevKeyLoaded;
+    return false;
+  }
+
+  m_Key = keyPlain;
+  m_KeyLoaded = true;
+  return true;
+}
+
 bool CryptoUtil::IsReady()
 {
   return EnsureKey();

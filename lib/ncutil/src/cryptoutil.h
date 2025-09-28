@@ -19,6 +19,8 @@ public:
   static bool Decrypt(const std::string& p_HexCipherText, std::string& p_PlainText);
   static bool IsReady();
   static void SetPassphrase(const std::string& p_Passphrase);
+  static bool ChangePassphrase(const std::string& p_OldPassphrase, const std::string& p_NewPassphrase);
+  static bool IsPassphraseProtected();
 
 private:
   static bool EnsureKey();
